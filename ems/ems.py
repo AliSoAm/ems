@@ -37,7 +37,6 @@ def on_request(props, body):
     q.put({"props":props, "body": str(response)})
 
 def thread_function(ch, method, properties, body):
-    print 'new request'
     threading.Thread(target=on_request, args=(properties, body)).start()
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
