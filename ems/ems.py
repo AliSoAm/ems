@@ -16,6 +16,7 @@
 
 # !/usr/bin/env python
 import threading
+import Queue
 import os
 import time
 import logging
@@ -28,18 +29,48 @@ __author__ = 'ogo'
 
 log = logging.getLogger(__name__)
 
+q = Queue.Queue()
 
-def on_request(ch, method, props, body):
+
+def on_request(props, body):
     response = on_message(body)
-    ch.basic_publish(exchange='', routing_key=props.reply_to,
-                     properties=pika.BasicProperties(correlation_id=props.correlation_id, content_type='text/plain'),
-                     body=str(response))
-    ch.basic_ack(delivery_tag=method.delivery_tag)
-    log.info("Answer sent")
-
+    q.put({"props":props, "body": str(response)})
 
 def thread_function(ch, method, properties, body):
-    threading.Thread(target=on_request, args=(ch, method, properties, body)).start()
+    print 'new request'
+    threading.Thread(target=on_request, args=(properties, body)).start()
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+
+def publish_thread(broker_ip, broker_port, virtual_host, rabbit_credentials, heartbeat):
+    sleep_time = 1
+    while True:
+        try:
+            connection = pika.BlockingConnection(
+                pika.ConnectionParameters(host=broker_ip, port=int(broker_port),
+                                          virtual_host=virtual_host, credentials=rabbit_credentials, heartbeat_interval=int(heartbeat)))
+            channel = connection.channel()
+            while True:
+                try:
+                    o = q.get(block=True, timeout=10)
+                    try:
+                        props = o["props"]
+                        body = o["body"]
+                        channel.basic_publish(exchange='', routing_key=props.reply_to,
+                                         properties=pika.BasicProperties(correlation_id=props.correlation_id, content_type='text/plain'),
+                                         body=body)
+                    except:
+                        q.put(o)
+                        raise
+                except Queue.Empty:
+                    connection.process_data_events(time_limit=10)
+        except Exception:
+            # logging.exception('')
+            time.sleep(sleep_time)
+            if (sleep_time < 10):
+                sleep_time = sleep_time + 1
+            else:
+                sleep_time = sleep_time + 10
 
 
 def main():
@@ -72,7 +103,7 @@ def main():
         exchange_name = 'openbaton-exchange'
     if not broker_port:
         broker_port = "5672"
-    if not virtual_host: 
+    if not virtual_host:
         virtual_host = "/"
     if not queue_type:
         queue_type = "generic"
@@ -80,11 +111,15 @@ def main():
         "EMS configuration paramters are "
         "hostname: %s, username: %s, password: *****, autodel: %s, heartbeat: %s, exchange name: %s" % (
             hostname, username, autodel, heartbeat, exchange_name))
+    broker_ip = _map.get("broker_ip")
     rabbit_credentials = pika.PlainCredentials(username, password)
+    tt = threading.Thread(target=publish_thread, args=(broker_ip, broker_port, virtual_host, rabbit_credentials, heartbeat))
+    tt.daemon = True
+    tt.start()
     while True:
         try:
             connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host=_map.get("broker_ip"), port=int(broker_port),
+                pika.ConnectionParameters(host=broker_ip, port=int(broker_port),
                                           virtual_host=virtual_host, credentials=rabbit_credentials, heartbeat_interval=int(heartbeat)))
             channel = connection.channel()
             #channel.exchange_declare(exchange=exchange_name, type="topic", durable=True)
@@ -108,4 +143,3 @@ def main():
                 sleep_time = sleep_time + 10
             #print("Trying to reconnect")
             # log.info("Trying to reconnect...")
-
